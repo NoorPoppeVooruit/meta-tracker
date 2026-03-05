@@ -31,6 +31,12 @@ PAGE_B = {
     "ig_user_id":   os.environ.get("PAGE_B_IG_ID", ""),
     "access_token": os.environ.get("PAGE_B_TOKEN", ""),
 }
+PAGE_C = {
+    "label":        "persoon_c",
+    "page_id":      os.environ.get("PAGE_C_ID", ""),
+    "ig_user_id":   os.environ.get("PAGE_C_IG_ID", ""),
+    "access_token": os.environ.get("PAGE_C_TOKEN", ""),
+}
 
 DATA_DIR = Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "/tmp")) / "meta_data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -197,7 +203,7 @@ def collect_all():
     log.info("═══ Meting gestart ═══")
     con = sqlite3.connect(DB_PATH)
     try:
-        for cfg in [PAGE_A, PAGE_B]:
+        for cfg in [PAGE_A, PAGE_B, PAGE_C]:
             try: collect_page(con, cfg)
             except Exception as e: log.error(f"Fout {cfg['label']}: {e}", exc_info=True)
     finally: con.close()
@@ -208,6 +214,7 @@ if __name__ == "__main__":
     log.info("🚀 Meta Tracker — Railway")
     log.info(f"   PAGE_A_ID  = {PAGE_A['page_id']  or '⚠️ NIET INGESTELD'}")
     log.info(f"   PAGE_B_ID  = {PAGE_B['page_id']  or '⚠️ NIET INGESTELD'}")
+    log.info(f"   PAGE_C_ID  = {PAGE_C['page_id']  or '⚠️ NIET INGESTELD'}")
     log.info(f"   DB         = {DB_PATH}")
     init_db()
     collect_all()
