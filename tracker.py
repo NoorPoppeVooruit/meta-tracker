@@ -1,14 +1,18 @@
 """
-Meta Analytics Tracker — Railway-ready versie
-===============================================
-Tokens worden gelezen uit environment variables.
-Stel deze in via het Railway dashboard onder "Variables".
+Meta Analytics Tracker — Railway + Google Sheets versie
+=========================================================
+- Elk uur data ophalen via Meta Graph API
+- Opslaan in SQLite op Railway Volume (permanent)
+- Elke dag om 08:00 automatisch exporteren naar Google Sheets
 """
 
-import os, sqlite3, requests, logging, time
+import os, sqlite3, requests, logging, time, csv, io
 from datetime import datetime, timedelta
 from pathlib import Path
 from apscheduler.schedulers.blocking import BlockingScheduler
+import gspread
+from google.oauth2.service_account import Credentials
+import json
 
 logging.basicConfig(level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -38,10 +42,17 @@ PAGE_C = {
     "access_token": os.environ.get("PAGE_C_TOKEN", ""),
 }
 
+# Railway Volume pad (permanent) of /tmp (tijdelijk)
 DATA_DIR = Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "/tmp")) / "meta_data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = str(DATA_DIR / "meta_analytics.db")
 
+# Google Sheets instellingen
+SHEETS_ID            = os.environ.get("GOOGLE_SHEET_ID", "")
+GOOGLE_CREDS_JSON    = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+
+
+# ── Database ──────────────────────────────────────────────────────────────────
 
 def init_db():
     con = sqlite3.connect(DB_PATH)
@@ -65,6 +76,7 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_snap_post ON snapshots(post_id);
         CREATE INDEX IF NOT EXISTS idx_snap_page ON snapshots(page_label);
+        CREATE INDEX IF NOT EXISTS idx_snap_time ON snapshots(measured_at);
     """)
     con.commit(); con.close()
     log.info(f"✅ Database: {DB_PATH}")
@@ -100,13 +112,14 @@ def active_posts(con, label):
         (label, cutoff)).fetchall()
 
 
+# ── Meta API ──────────────────────────────────────────────────────────────────
+
 def api(endpoint, params):
     try:
         r = requests.get(f"{BASE_URL}/{endpoint}", params=params, timeout=15)
         r.raise_for_status(); return r.json()
     except Exception as e:
         log.error(f"API fout {endpoint}: {e}"); return None
-
 
 def fb_posts(pid, tok):
     d = api(f"{pid}/posts", {"access_token": tok, "fields": "id,message,created_time,permalink_url", "limit": MAX_POSTS})
@@ -160,6 +173,120 @@ def ig_followers(ig_id, tok):
     return d.get("followers_count", 0) if d else 0
 
 
+# ── Google Sheets export ──────────────────────────────────────────────────────
+
+def get_sheets_client():
+    if not GOOGLE_CREDS_JSON or not SHEETS_ID:
+        log.warning("⚠️  Google Sheets niet geconfigureerd — sla export over")
+        return None
+    try:
+        creds_dict = json.loads(GOOGLE_CREDS_JSON)
+        scopes = ["https://spreadsheets.google.com/feeds",
+                  "https://www.googleapis.com/auth/drive"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        return gspread.authorize(creds)
+    except Exception as e:
+        log.error(f"Google Sheets auth fout: {e}"); return None
+
+
+def export_to_sheets():
+    log.info("📊 Google Sheets export gestart...")
+    client = get_sheets_client()
+    if not client: return
+
+    try:
+        sh = client.open_by_key(SHEETS_ID)
+    except Exception as e:
+        log.error(f"Kan spreadsheet niet openen: {e}"); return
+
+    con = sqlite3.connect(DB_PATH)
+
+    # ── Tab 1: Snapshots (alle metingen) ──────────────────────────────────────
+    try:
+        rows = con.execute("""
+            SELECT s.measured_at, s.page_label, s.platform, s.post_id,
+                   p.created_time, p.message,
+                   s.reach, s.impressions, s.engaged_users,
+                   s.likes, s.comments, s.shares, s.reactions,
+                   s.ig_reach, s.ig_impressions, s.ig_saved, s.ig_video_views
+            FROM snapshots s JOIN posts p USING(post_id)
+            ORDER BY s.measured_at DESC
+            LIMIT 5000
+        """).fetchall()
+
+        header = ["Gemeten op","Pagina","Platform","Post ID","Geplaatst op","Bericht (preview)",
+                  "FB Reach","FB Impressions","FB Engaged","Likes","Comments","Shares","Reactions",
+                  "IG Reach","IG Impressions","IG Saves","IG Video Views"]
+
+        try:
+            ws = sh.worksheet("Snapshots")
+            ws.clear()
+        except:
+            ws = sh.add_worksheet("Snapshots", rows=5100, cols=20)
+
+        ws.update([header] + [list(r) for r in rows])
+        log.info(f"  ✓ Snapshots tab bijgewerkt ({len(rows)} rijen)")
+    except Exception as e:
+        log.error(f"Snapshots tab fout: {e}")
+
+    # ── Tab 2: Samenvatting per pagina ────────────────────────────────────────
+    try:
+        summary_rows = con.execute("""
+            SELECT s.page_label, s.platform,
+                   COUNT(DISTINCT s.post_id)        AS posts,
+                   ROUND(AVG(COALESCE(s.reach, s.ig_reach)), 0)       AS gem_reach,
+                   ROUND(AVG(s.likes), 1)           AS gem_likes,
+                   ROUND(AVG(s.comments), 1)        AS gem_comments,
+                   MAX(COALESCE(s.reach, s.ig_reach))                  AS max_reach
+            FROM snapshots s
+            WHERE s.id IN (
+                SELECT MAX(id) FROM snapshots GROUP BY post_id
+            )
+            GROUP BY s.page_label, s.platform
+            ORDER BY gem_reach DESC
+        """).fetchall()
+
+        header2 = ["Pagina","Platform","Posts gevolgd","Gem. Reach","Gem. Likes","Gem. Comments","Max. Reach"]
+
+        try:
+            ws2 = sh.worksheet("Samenvatting")
+            ws2.clear()
+        except:
+            ws2 = sh.add_worksheet("Samenvatting", rows=50, cols=10)
+
+        ws2.update([header2] + [list(r) for r in summary_rows])
+        log.info(f"  ✓ Samenvatting tab bijgewerkt")
+    except Exception as e:
+        log.error(f"Samenvatting tab fout: {e}")
+
+    # ── Tab 3: Follower groei ─────────────────────────────────────────────────
+    try:
+        fol_rows = con.execute("""
+            SELECT measured_at, page_label, platform, followers, fans
+            FROM follower_snapshots
+            ORDER BY measured_at DESC
+            LIMIT 2000
+        """).fetchall()
+
+        header3 = ["Gemeten op","Pagina","Platform","Volgers","Fans (FB)"]
+
+        try:
+            ws3 = sh.worksheet("Volgers")
+            ws3.clear()
+        except:
+            ws3 = sh.add_worksheet("Volgers", rows=2100, cols=6)
+
+        ws3.update([header3] + [list(r) for r in fol_rows])
+        log.info(f"  ✓ Volgers tab bijgewerkt ({len(fol_rows)} rijen)")
+    except Exception as e:
+        log.error(f"Volgers tab fout: {e}")
+
+    con.close()
+    log.info("✅ Google Sheets export klaar!")
+
+
+# ── Collect ───────────────────────────────────────────────────────────────────
+
 def collect_page(con, cfg):
     label, token = cfg["label"], cfg["access_token"]
     if not token:
@@ -171,6 +298,7 @@ def collect_page(con, cfg):
         pid = cfg["page_id"]
         flw, fans = fb_followers(pid, token)
         insert_followers(con, label, "facebook", flw, fans)
+        log.info(f"  FB followers={flw} fans={fans}")
         for p in fb_posts(pid, token):
             upsert_post(con, post_id=p["id"], page_id=pid, page_label=label, platform="facebook",
                         message=p.get("message","")[:500], media_type=None,
@@ -186,6 +314,7 @@ def collect_page(con, cfg):
         ig_id = cfg["ig_user_id"]
         flw = ig_followers(ig_id, token)
         insert_followers(con, label, "instagram", flw)
+        log.info(f"  IG followers={flw}")
         for media in ig_media(ig_id, token):
             upsert_post(con, post_id=media["id"], page_id=ig_id, page_label=label, platform="instagram",
                         message=media.get("caption","")[:500], media_type=media.get("media_type"),
@@ -211,15 +340,21 @@ def collect_all():
 
 
 if __name__ == "__main__":
-    log.info("🚀 Meta Tracker — Railway")
-    log.info(f"   PAGE_A_ID  = {PAGE_A['page_id']  or '⚠️ NIET INGESTELD'}")
-    log.info(f"   PAGE_B_ID  = {PAGE_B['page_id']  or '⚠️ NIET INGESTELD'}")
-    log.info(f"   PAGE_C_ID  = {PAGE_C['page_id']  or '⚠️ NIET INGESTELD'}")
-    log.info(f"   DB         = {DB_PATH}")
+    log.info("🚀 Meta Tracker — Railway + Google Sheets")
+    log.info(f"   PAGE_A = {PAGE_A['page_id'] or '⚠️ niet ingesteld'}")
+    log.info(f"   PAGE_B = {PAGE_B['page_id'] or '⚠️ niet ingesteld'}")
+    log.info(f"   PAGE_C = {PAGE_C['page_id'] or '⚠️ niet ingesteld'}")
+    log.info(f"   SHEETS = {SHEETS_ID or '⚠️ niet ingesteld'}")
+    log.info(f"   DB     = {DB_PATH}")
+
     init_db()
     collect_all()
+    export_to_sheets()  # meteen eerste export
+
     scheduler = BlockingScheduler(timezone="Europe/Amsterdam")
-    scheduler.add_job(collect_all, "interval", hours=1, id="collect")
-    log.info("⏰ Elk uur een meting")
+    scheduler.add_job(collect_all,      "interval", hours=1,  id="collect")
+    scheduler.add_job(export_to_sheets, "cron",     hour=8,   id="sheets_export")
+
+    log.info("⏰ Elk uur meting | Elke dag 08:00 export naar Sheets")
     try: scheduler.start()
     except (KeyboardInterrupt, SystemExit): log.info("Gestopt.")
