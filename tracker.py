@@ -24,19 +24,19 @@ TRACK_DAYS = 3
 MAX_POSTS  = 10
 
 PAGE_A = {
-    "label":        "persoon_a",
+    "label":        "Hans Bonte",
     "page_id":      os.environ.get("PAGE_A_ID", ""),
     "ig_user_id":   os.environ.get("PAGE_A_IG_ID", ""),
     "access_token": os.environ.get("PAGE_A_TOKEN", ""),
 }
 PAGE_B = {
-    "label":        "persoon_b",
+    "label":        "Caroline Gennez",
     "page_id":      os.environ.get("PAGE_B_ID", ""),
     "ig_user_id":   os.environ.get("PAGE_B_IG_ID", ""),
     "access_token": os.environ.get("PAGE_B_TOKEN", ""),
 }
 PAGE_C = {
-    "label":        "persoon_c",
+    "label":        "Frank Vandenbroucke",
     "page_id":      os.environ.get("PAGE_C_ID", ""),
     "ig_user_id":   os.environ.get("PAGE_C_IG_ID", ""),
     "access_token": os.environ.get("PAGE_C_TOKEN", ""),
