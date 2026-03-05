@@ -201,31 +201,42 @@ def export_to_sheets():
 
     con = sqlite3.connect(DB_PATH)
 
-    # ── Tab 1: Snapshots (alle metingen) ──────────────────────────────────────
+    # ── Tab 1: Snapshots per uur (72u per post, met link) ────────────────────
     try:
         rows = con.execute("""
-            SELECT s.measured_at, s.page_label, s.platform, s.post_id,
-                   p.created_time, p.message,
-                   s.reach, s.impressions, s.engaged_users,
-                   s.likes, s.comments, s.shares, s.reactions,
-                   s.ig_reach, s.ig_impressions, s.ig_saved, s.ig_video_views
-            FROM snapshots s JOIN posts p USING(post_id)
-            ORDER BY s.measured_at DESC
-            LIMIT 5000
+            SELECT
+                s.measured_at,
+                s.page_label,
+                s.platform,
+                p.created_time,
+                ROUND((JULIANDAY(s.measured_at) - JULIANDAY(p.created_time)) * 24, 1) AS uur_na_plaatsing,
+                SUBSTR(COALESCE(p.message,''), 1, 80),
+                p.permalink,
+                s.reach, s.impressions, s.engaged_users,
+                s.likes, s.comments, s.shares, s.reactions,
+                s.ig_reach, s.ig_impressions, s.ig_saved, s.ig_video_views,
+                s.post_id
+            FROM snapshots s
+            JOIN posts p USING(post_id)
+            WHERE (JULIANDAY(s.measured_at) - JULIANDAY(p.created_time)) * 24 <= 72
+            ORDER BY p.created_time DESC, s.measured_at ASC
+            LIMIT 10000
         """).fetchall()
 
-        header = ["Gemeten op","Pagina","Platform","Post ID","Geplaatst op","Bericht (preview)",
-                  "FB Reach","FB Impressions","FB Engaged","Likes","Comments","Shares","Reactions",
-                  "IG Reach","IG Impressions","IG Saves","IG Video Views"]
+        header = ["Gemeten op (UTC)", "Pagina", "Platform", "Post geplaatst op",
+                  "Uur na plaatsing", "Bericht (preview)", "Link naar post",
+                  "FB Reach", "FB Impressions", "FB Engaged Users",
+                  "Likes", "Comments", "Shares", "Reactions",
+                  "IG Reach", "IG Impressions", "IG Saves", "IG Video Views", "Post ID"]
 
         try:
-            ws = sh.worksheet("Snapshots")
+            ws = sh.worksheet("Snapshots per uur")
             ws.clear()
-        except:
-            ws = sh.add_worksheet("Snapshots", rows=5100, cols=20)
+        except Exception:
+            ws = sh.add_worksheet("Snapshots per uur", rows=10100, cols=20)
 
         ws.update([header] + [list(r) for r in rows])
-        log.info(f"  ✓ Snapshots tab bijgewerkt ({len(rows)} rijen)")
+        log.info(f"  ✓ Snapshots tab bijgewerkt ({len(rows)} rijen, 72u per post)")
     except Exception as e:
         log.error(f"Snapshots tab fout: {e}")
 
